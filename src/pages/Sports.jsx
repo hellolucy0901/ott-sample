@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { onAuthStateChanged } from 'firebase/auth'
 import { addDoc, collection, limit, onSnapshot, orderBy, query, serverTimestamp } from 'firebase/firestore'
 import { auth, db } from '../firebase/firebase'
+import { mlbGames, scheduleUrl } from './sportsSchedule'
 import './Sports.css'
 
 const demoGames = [
@@ -96,41 +97,76 @@ export function Sports() {
   const [games, setGames] = useState(demoGames)
   const [selectedId, setSelectedId] = useState(null)
   const [sourceError, setSourceError] = useState('')
+  const [videoError, setVideoError] = useState('')
   const source = import.meta.env.VITE_SPORTS_SCHEDULE_URL
+  const streamSource = import.meta.env.VITE_SPORTS_STREAMS_URL
   useEffect(() => {
-    if (!source) return
     const controller = new AbortController()
-    fetch(source, { signal: controller.signal }).then(response => {
-      if (!response.ok) throw new Error('schedule')
-      return response.json()
-    }).then(data => {
-      if (!Array.isArray(data) || data.length < 5 || data.some(game =>
-        !/^[a-zA-Z0-9_-]{1,100}$/.test(game.id) || typeof game.home !== 'string' || typeof game.away !== 'string' ||
-        !validEmbed(game.embedUrl)) || new Set(data.map(game => game.id)).size !== data.length) throw new Error('format')
-      setGames(data.map(game => ({ ...game, demo: false })))
-    }).catch(error => {
-      if (error.name !== 'AbortError') setSourceError('중계 목록을 불러오지 못해 데모 목록을 표시합니다.')
-    })
-    return () => controller.abort()
-  }, [source])
-  const selected = games.find(game => game.id === selectedId) || games[0]
+    async function refresh() {
+      try {
+        const response = await fetch(source || scheduleUrl(), { signal: controller.signal })
+        if (!response.ok) throw new Error('schedule')
+        const data = await response.json()
+        let next
+        if (source) {
+          if (!Array.isArray(data) || data.length < 5 || data.some(game =>
+            !/^[a-zA-Z0-9_-]{1,100}$/.test(game.id) || typeof game.home !== 'string' || typeof game.away !== 'string' ||
+            (game.embedUrl && !validEmbed(game.embedUrl))) || new Set(data.map(game => game.id)).size !== data.length) throw new Error('format')
+          next = data.map(game => ({ ...game, demo: false }))
+        } else {
+          next = mlbGames(data)
+          if (streamSource) {
+            try {
+              const streamResponse = await fetch(streamSource, { signal: controller.signal })
+              if (!streamResponse.ok) throw new Error('streams')
+              const streams = await streamResponse.json()
+              if (!streams || typeof streams !== 'object' || Array.isArray(streams)) throw new Error('stream format')
+              next = next.map(game => ({ ...game, embedUrl: validEmbed(streams[game.id]) || undefined }))
+              setVideoError('')
+            } catch (error) {
+              if (error.name === 'AbortError') return
+              setVideoError('영상 목록을 불러오지 못했습니다. 중계 설정을 확인해 주세요.')
+            }
+          }
+        }
+        if (next.length === 0) {
+          setGames(demoGames)
+          setSourceError('표시할 실제 경기가 없어 KBO 데모 목록을 표시합니다.')
+        } else {
+          setGames(next)
+          setSourceError('')
+        }
+      } catch (error) {
+        if (error.name !== 'AbortError') setSourceError('실제 경기 정보를 불러오지 못해 KBO 데모 목록을 표시합니다.')
+      }
+    }
+    refresh()
+    const timer = setInterval(refresh, 30000)
+    const onFocus = () => refresh()
+    window.addEventListener('focus', onFocus)
+    return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); controller.abort() }
+  }, [source, streamSource])
+  const selected = games.find(game => game.id === selectedId) || games.find(game => game.status === 'LIVE') || games[0]
   const embed = validEmbed(selected.embedUrl)
+  const gameTime = game => game.gameDate ? new Date(game.gameDate).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
   return <main className="sports-page">
     <div className="sports-container">
       <div className="sports-title"><div><p className="sports-eyebrow">PLAY TOGETHER</p><h1>스포츠 <span>⚾</span></h1><p>좋아하는 팀의 경기, 함께 보면 더 즐거우니까.</p></div><span className="sports-league">BASEBALL · 야구</span></div>
       {sourceError && <p role="alert" className="sports-error">{sourceError}</p>}
-      {selected.demo && <p className="sports-demo">데모 편성표 · 실제 경기 일정이나 생중계가 아닙니다. 중계 제공 업체 연결 후 실시간 영상을 시청할 수 있습니다.</p>}
+      {videoError && <p role="alert" className="sports-error">{videoError}</p>}
+      {selected.demo && <p className="sports-demo">KBO 데모 편성표 · 실제 경기 일정이나 생중계가 아닙니다. 중계 제공 업체 연결 후 실시간 영상을 시청할 수 있습니다.</p>}
+      {!selected.demo && !source && <p className="sports-demo">MLB 실제 경기 일정·점수 · 30초마다 갱신합니다. 영상 중계는 별도 제공 업체 연결이 필요합니다.</p>}
       <section className="sports-game-list" aria-label="야구 경기 목록">
         {games.map(game => <button key={game.id} onClick={() => setSelectedId(game.id)} aria-pressed={game.id === selected.id} className={`sports-game ${game.id === selected.id ? 'selected' : ''}`}>
-          <span className="sports-game-meta"><span className={game.demo ? '' : 'sports-live'}>{game.demo ? 'DEMO' : '중계 채널'}</span><span>{game.venue || '야구 경기장'}</span></span>
-          <strong>{game.away}</strong><span className="sports-vs">VS</span><strong>{game.home}</strong><span className="sports-game-action">{game.id === selected.id ? '선택한 경기' : '경기 보기 →'}</span>
+          <span className="sports-game-meta"><span className={game.status === 'LIVE' ? 'sports-live' : ''}>{game.demo ? 'KBO DEMO' : `${game.league || 'BASEBALL'} · ${game.status || '일정'}`}</span><span>{gameTime(game) || game.venue || '야구 경기장'}</span></span>
+          <strong>{game.away}{game.awayScore != null ? ` ${game.awayScore}` : ''}</strong><span className="sports-vs">{game.inning || 'VS'}</span><strong>{game.home}{game.homeScore != null ? ` ${game.homeScore}` : ''}</strong><span className="sports-game-action">{game.id === selected.id ? '선택한 경기' : validEmbed(game.embedUrl) ? '중계 보기 →' : '경기 정보 보기 →'}</span>
         </button>)}
       </section>
       <div className="sports-watch-layout">
         <section className="sports-broadcast" aria-label="선택한 경기 중계">
           <div className="sports-video">{embed ? <iframe key={selected.id} src={embed} title={`${selected.away} 대 ${selected.home} 중계`} allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowFullScreen referrerPolicy="strict-origin-when-cross-origin" />
             : <div className="sports-video-empty"><span>⚾</span><h2>경기의 설렘을, 함께</h2><p>아직 연결된 실시간 중계가 없습니다.</p><small>공식 중계 영상이 연결되면 이곳에서 시청할 수 있어요.</small></div>}</div>
-          <div className="sports-broadcast-info"><span className="sports-eyebrow">{selected.demo ? 'DEMO MATCH' : 'BASEBALL CHANNEL'}</span><h2>{selected.away} <span>vs</span> {selected.home}</h2><p>{selected.venue} · 경기별 채팅방에서 함께 응원하세요</p></div>
+          <div className="sports-broadcast-info"><span className="sports-eyebrow">{selected.demo ? 'KBO DEMO MATCH' : `${selected.league || 'BASEBALL'} · ${selected.status || '경기'}`}</span><h2>{selected.away}{selected.awayScore != null ? ` ${selected.awayScore}` : ''} <span>vs</span> {selected.home}{selected.homeScore != null ? ` ${selected.homeScore}` : ''}</h2><p>{gameTime(selected)} {selected.venue} · 경기별 채팅방에서 함께 응원하세요</p>{selected.league === 'MLB' && <a className="sports-official-link" href={`https://www.mlb.com/gameday/${selected.id.slice(4)}`} target="_blank" rel="noopener noreferrer">MLB 공식 경기 페이지 보기 ↗</a>}</div>
         </section>
         <GameChat key={selected.id} game={selected} />
       </div>
