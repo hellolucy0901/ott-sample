@@ -26,3 +26,35 @@ export function mlbGames(data) {
     }
   })
 }
+
+export function recentHighlightsUrl(now = new Date()) {
+  const start = new Date(now)
+  start.setUTCDate(start.getUTCDate() - 45)
+  const day = date => date.toISOString().slice(0, 10)
+  return `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${day(start)}&endDate=${day(now)}`
+}
+
+export function archiveHighlightsUrl(now = new Date()) {
+  const year = now.getUTCFullYear() - 1
+  return `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${year}-09-01&endDate=${year}-11-10`
+}
+
+export function finishedGames(data) {
+  return (data.dates || []).flatMap(date => date.games || [])
+    .filter(game => game.status?.abstractGameState === 'Final')
+    .sort((a, b) => new Date(b.gameDate) - new Date(a.gameDate))
+    .slice(0, 18)
+}
+
+export function gameHighlight(game, content) {
+  const items = content.highlights?.highlights?.items || []
+  const preferred = items.find(item => /(?:game.*highlights|highlights.*game)/i.test(item.title || '') &&
+    item.playbacks?.some(playback => playback.name === 'mp4Avc')) ||
+    items.find(item => /condensed game/i.test(item.title || '') && item.playbacks?.some(playback => playback.name === 'mp4Avc'))
+  if (!preferred) return null
+  const url = preferred.playbacks.find(playback => playback.name === 'mp4Avc')?.url
+  if (!url?.startsWith('https://mlb-cuts-diamond.mlb.com/')) return null
+  const poster = preferred.image?.cuts?.find(cut => cut.width === 640 || cut.width === 480)?.src ||
+    preferred.image?.cuts?.find(cut => cut.aspectRatio === '16:9')?.src
+  return { id: `highlight-${game.gamePk}`, title: preferred.title, url, poster, game: mlbGames({ dates: [{ games: [game] }] })[0] }
+}

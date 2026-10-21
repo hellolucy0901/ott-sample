@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { onAuthStateChanged } from 'firebase/auth'
 import { addDoc, collection, limit, onSnapshot, orderBy, query, serverTimestamp } from 'firebase/firestore'
 import { auth, db } from '../firebase/firebase'
-import { mlbGames, scheduleUrl } from './sportsSchedule'
+import { archiveHighlightsUrl, finishedGames, gameHighlight, mlbGames, recentHighlightsUrl, scheduleUrl } from './sportsSchedule'
 import './Sports.css'
 
 const demoGames = [
@@ -98,6 +98,10 @@ export function Sports() {
   const [selectedId, setSelectedId] = useState(null)
   const [sourceError, setSourceError] = useState('')
   const [videoError, setVideoError] = useState('')
+  const [highlights, setHighlights] = useState([])
+  const [highlightError, setHighlightError] = useState('')
+  const [selectedHighlight, setSelectedHighlight] = useState(null)
+  const watchRef = useRef(null)
   const source = import.meta.env.VITE_SPORTS_SCHEDULE_URL
   const streamSource = import.meta.env.VITE_SPORTS_STREAMS_URL
   useEffect(() => {
@@ -146,8 +150,40 @@ export function Sports() {
     window.addEventListener('focus', onFocus)
     return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); controller.abort() }
   }, [source, streamSource])
+  useEffect(() => {
+    const controller = new AbortController()
+    async function loadHighlights() {
+      try {
+        async function schedule(url) {
+          const response = await fetch(url, { signal: controller.signal })
+          if (!response.ok) throw new Error('highlight schedule')
+          return finishedGames(await response.json())
+        }
+        let finished = await schedule(recentHighlightsUrl())
+        if (finished.length < 5) finished = await schedule(archiveHighlightsUrl())
+        const videos = await Promise.all(finished.map(async game => {
+          try {
+            const response = await fetch(`https://statsapi.mlb.com/api/v1/game/${game.gamePk}/content`, { signal: controller.signal })
+            return response.ok ? gameHighlight(game, await response.json()) : null
+          } catch { return null }
+        }))
+        if (controller.signal.aborted) return
+        const playable = videos.filter(Boolean).slice(0, 12)
+        setHighlights(playable)
+        setHighlightError(playable.length ? '' : '지금 재생할 수 있는 공식 하이라이트를 찾지 못했습니다.')
+      } catch (error) {
+        if (error.name !== 'AbortError') setHighlightError('하이라이트 목록을 불러오지 못했습니다.')
+      }
+    }
+    loadHighlights()
+    return () => controller.abort()
+  }, [])
+  useEffect(() => {
+    if (selectedHighlight) watchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [selectedHighlight])
   const selected = games.find(game => game.id === selectedId) || games.find(game => game.status === 'LIVE') || games[0]
-  const embed = validEmbed(selected.embedUrl)
+  const activeGame = selectedHighlight?.game || selected
+  const embed = selectedHighlight ? null : validEmbed(selected.embedUrl)
   const gameTime = game => game.gameDate ? new Date(game.gameDate).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
   return <main className="sports-page">
     <div className="sports-container">
@@ -157,18 +193,28 @@ export function Sports() {
       {selected.demo && <p className="sports-demo">KBO 데모 편성표 · 실제 경기 일정이나 생중계가 아닙니다. 중계 제공 업체 연결 후 실시간 영상을 시청할 수 있습니다.</p>}
       {!selected.demo && !source && <p className="sports-demo">MLB 실제 경기 일정·점수 · 30초마다 갱신합니다. 영상 중계는 별도 제공 업체 연결이 필요합니다.</p>}
       <section className="sports-game-list" aria-label="야구 경기 목록">
-        {games.map(game => <button key={game.id} onClick={() => setSelectedId(game.id)} aria-pressed={game.id === selected.id} className={`sports-game ${game.id === selected.id ? 'selected' : ''}`}>
+        {games.map(game => <button key={game.id} onClick={() => { setSelectedId(game.id); setSelectedHighlight(null) }} aria-pressed={!selectedHighlight && game.id === selected.id} className={`sports-game ${!selectedHighlight && game.id === selected.id ? 'selected' : ''}`}>
           <span className="sports-game-meta"><span className={game.status === 'LIVE' ? 'sports-live' : ''}>{game.demo ? 'KBO DEMO' : `${game.league || 'BASEBALL'} · ${game.status || '일정'}`}</span><span>{gameTime(game) || game.venue || '야구 경기장'}</span></span>
           <strong>{game.away}{game.awayScore != null ? ` ${game.awayScore}` : ''}</strong><span className="sports-vs">{game.inning || 'VS'}</span><strong>{game.home}{game.homeScore != null ? ` ${game.homeScore}` : ''}</strong><span className="sports-game-action">{game.id === selected.id ? '선택한 경기' : validEmbed(game.embedUrl) ? '중계 보기 →' : '경기 정보 보기 →'}</span>
         </button>)}
       </section>
-      <div className="sports-watch-layout">
+      <section className="sports-playlist" aria-label="경기 하이라이트 재생 목록">
+        <div className="sports-playlist-heading"><div><span className="sports-eyebrow">REPLAY THE MOMENT</span><h2>경기 하이라이트</h2></div><span>MLB 공식 영상 · 종료된 경기</span></div>
+        {highlightError && <p className="sports-error" role="status">{highlightError}</p>}
+        {!highlightError && highlights.length === 0 && <p className="sports-playlist-loading">재생할 경기를 찾는 중...</p>}
+        <div className="sports-playlist-list">{highlights.map(video => <button key={video.id} className={`sports-playlist-item ${selectedHighlight?.id === video.id ? 'selected' : ''}`} onClick={() => { setSelectedHighlight(video); setSelectedId(null) }} aria-pressed={selectedHighlight?.id === video.id}>
+          {video.poster && <img src={video.poster} alt="" loading="lazy" />}
+          <span className="sports-playlist-copy"><strong>{video.title}</strong><small>{gameTime(video.game)} · {video.game.away} vs {video.game.home}</small><em>▶ 영상 재생</em></span>
+        </button>)}</div>
+      </section>
+      <div className="sports-watch-layout" ref={watchRef}>
         <section className="sports-broadcast" aria-label="선택한 경기 중계">
-          <div className="sports-video">{embed ? <iframe key={selected.id} src={embed} title={`${selected.away} 대 ${selected.home} 중계`} allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowFullScreen referrerPolicy="strict-origin-when-cross-origin" />
+          <div className="sports-video">{selectedHighlight ? <video key={selectedHighlight.id} controls playsInline preload="metadata" poster={selectedHighlight.poster} src={selectedHighlight.url} aria-label={selectedHighlight.title}>브라우저에서 영상을 재생할 수 없습니다.</video>
+            : embed ? <iframe key={selected.id} src={embed} title={`${selected.away} 대 ${selected.home} 중계`} allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowFullScreen referrerPolicy="strict-origin-when-cross-origin" />
             : <div className="sports-video-empty"><span>⚾</span><h2>경기의 설렘을, 함께</h2><p>아직 연결된 실시간 중계가 없습니다.</p><small>공식 중계 영상이 연결되면 이곳에서 시청할 수 있어요.</small></div>}</div>
-          <div className="sports-broadcast-info"><span className="sports-eyebrow">{selected.demo ? 'KBO DEMO MATCH' : `${selected.league || 'BASEBALL'} · ${selected.status || '경기'}`}</span><h2>{selected.away}{selected.awayScore != null ? ` ${selected.awayScore}` : ''} <span>vs</span> {selected.home}{selected.homeScore != null ? ` ${selected.homeScore}` : ''}</h2><p>{gameTime(selected)} {selected.venue} · 경기별 채팅방에서 함께 응원하세요</p>{selected.league === 'MLB' && <a className="sports-official-link" href={`https://www.mlb.com/gameday/${selected.id.slice(4)}`} target="_blank" rel="noopener noreferrer">MLB 공식 경기 페이지 보기 ↗</a>}</div>
+          <div className="sports-broadcast-info"><span className="sports-eyebrow">{selectedHighlight ? 'MLB HIGHLIGHTS · REPLAY' : activeGame.demo ? 'KBO DEMO MATCH' : `${activeGame.league || 'BASEBALL'} · ${activeGame.status || '경기'}`}</span><h2>{selectedHighlight?.title || <>{activeGame.away}{activeGame.awayScore != null ? ` ${activeGame.awayScore}` : ''} <span>vs</span> {activeGame.home}{activeGame.homeScore != null ? ` ${activeGame.homeScore}` : ''}</>}</h2><p>{gameTime(activeGame)} {activeGame.venue} · 경기별 채팅방에서 함께 응원하세요</p>{activeGame.league === 'MLB' && <a className="sports-official-link" href={`https://www.mlb.com/gameday/${activeGame.id.slice(4)}`} target="_blank" rel="noopener noreferrer">MLB 공식 경기 페이지 보기 ↗</a>}</div>
         </section>
-        <GameChat key={selected.id} game={selected} />
+        <GameChat key={activeGame.id} game={activeGame} />
       </div>
     </div>
   </main>
