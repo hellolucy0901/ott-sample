@@ -14,6 +14,7 @@ import { TvDetail } from './pages/TvDetail'
 import { SelectMember } from './pages/SelectMember'
 import { Footer } from './components/Footer'
 import { Header } from './components/Header'
+import { Sports } from './pages/Sports'
 
 function App() {
   return (
@@ -26,6 +27,7 @@ function App() {
         <Route path="/new" element={<New />} />
         <Route path='/animate' element={<AnimatePage />} />
         <Route path="/heart" element={<Heart />} />
+        <Route path="/sports" element={<Sports />} />
         
         <Route path="/movie/:id" element={<MovieDetail />} />
         <Route path="/tv/:id" element={<TvDetail />} />
